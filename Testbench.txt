@@ -1,0 +1,503 @@
+`timescale 1ns/1ps
+
+interface axi_if #(
+    parameter ADDR_WIDTH = 32,
+    parameter DATA_WIDTH = 32
+)(
+    input logic ACLK,
+    input logic ARESETn
+);
+    logic [ADDR_WIDTH-1:0] AWADDR;
+    logic                  AWVALID;
+    logic                  AWREADY;
+    logic [DATA_WIDTH-1:0] WDATA;
+    logic [DATA_WIDTH/8-1:0] WSTRB;
+    logic                  WVALID;
+    logic                  WREADY;
+    logic [1:0] BRESP;
+    logic       BVALID;
+    logic       BREADY;
+    logic [ADDR_WIDTH-1:0] ARADDR;
+    logic                  ARVALID;
+    logic                  ARREADY;
+    logic [DATA_WIDTH-1:0] RDATA;
+    logic [1:0]            RRESP;
+    logic                  RVALID;
+    logic                  RREADY;
+endinterface
+
+interface ahb_if #(
+    parameter ADDR_WIDTH = 32,
+    parameter DATA_WIDTH = 32
+)(
+    input logic HCLK,
+    input logic HRESETn
+);
+    logic [ADDR_WIDTH-1:0] HADDR;
+    logic                  HWRITE;
+    logic [1:0]            HTRANS;
+    logic [2:0]            HSIZE;
+    logic [2:0]            HBURST;
+    logic [DATA_WIDTH-1:0] HWDATA;
+    logic [DATA_WIDTH-1:0] HRDATA;
+    logic                  HREADY;
+    logic                  HRESP;
+endinterface
+
+module tb_top;
+
+    import uvm_pkg::*;
+    `include "uvm_macros.svh"
+
+    logic ACLK;
+    logic HCLK;
+    logic ARESETn;
+    logic HRESETn;
+
+    axi_if axi_vif (.ACLK(ACLK), .ARESETn(ARESETn));
+    ahb_if ahb_vif (.HCLK(HCLK), .HRESETn(HRESETn));
+
+    axi4lite_to_ahblite_bridge dut (
+        .ACLK    (ACLK),
+        .ARESETn (ARESETn),
+        .AWADDR  (axi_vif.AWADDR),
+        .AWVALID (axi_vif.AWVALID),
+        .AWREADY (axi_vif.AWREADY),
+        .WDATA   (axi_vif.WDATA),
+        .WSTRB   (axi_vif.WSTRB),
+        .WVALID  (axi_vif.WVALID),
+        .WREADY  (axi_vif.WREADY),
+        .BRESP   (axi_vif.BRESP),
+        .BVALID  (axi_vif.BVALID),
+        .BREADY  (axi_vif.BREADY),
+        .ARADDR  (axi_vif.ARADDR),
+        .ARVALID (axi_vif.ARVALID),
+        .ARREADY (axi_vif.ARREADY),
+        .RDATA   (axi_vif.RDATA),
+        .RRESP   (axi_vif.RRESP),
+        .RVALID  (axi_vif.RVALID),
+        .RREADY  (axi_vif.RREADY),
+        .HCLK    (HCLK),
+        .HRESETn (HRESETn),
+        .HADDR   (ahb_vif.HADDR),
+        .HWRITE  (ahb_vif.HWRITE),
+        .HTRANS  (ahb_vif.HTRANS),
+        .HSIZE   (ahb_vif.HSIZE),
+        .HBURST  (ahb_vif.HBURST),
+        .HWDATA  (ahb_vif.HWDATA),
+        .HRDATA  (ahb_vif.HRDATA),
+        .HREADY  (ahb_vif.HREADY),
+        .HRESP   (ahb_vif.HRESP)
+    );
+
+    always #5 ACLK = ~ACLK;
+    always #5 HCLK = ~HCLK;
+
+    initial begin
+        ACLK = 0;
+        HCLK = 0;
+        ARESETn = 0;
+        HRESETn = 0;
+        #30;
+        ARESETn = 1;
+        HRESETn = 1;
+    end
+
+    // AHB Slave Memory Model with Sequential Read Support
+    logic [31:0] ahb_memory [0:255];
+
+    initial begin
+        ahb_vif.HREADY = 1'b1;
+        ahb_vif.HRESP  = 1'b0;
+    end
+
+    always_ff @(posedge HCLK) begin
+        if (HRESETn) begin
+            if (ahb_vif.HREADY && (ahb_vif.HTRANS == 2'b10 || ahb_vif.HTRANS == 2'b11)) begin
+                if (ahb_vif.HWRITE) begin
+                    ahb_memory[ahb_vif.HADDR[9:2]] <= ahb_vif.HWDATA;
+                    $display("[AHB SLAVE] WRITE ADDR=%h DATA=%h", ahb_vif.HADDR, ahb_vif.HWDATA);
+                end else begin
+                    ahb_vif.HRDATA <= ahb_memory[ahb_vif.HADDR[9:2]];
+                end
+            end
+        end
+    end
+
+    //========================================================
+    // UVM CLASSES & RANDOMIZED SEQUENCE
+    //========================================================
+    class axi_transaction extends uvm_sequence_item;
+        rand bit        is_write;
+        rand bit [31:0] addr;
+        rand bit [31:0] data;
+        rand bit [3:0]  wstrb;
+        bit [31:0]      rdata;
+        bit [1:0]       resp;
+
+        `uvm_object_utils_begin(axi_transaction)
+            `uvm_field_int(is_write, UVM_ALL_ON)
+            `uvm_field_int(addr,     UVM_ALL_ON)
+            `uvm_field_int(data,     UVM_ALL_ON)
+            `uvm_field_int(wstrb,    UVM_ALL_ON)
+            `uvm_field_int(rdata,    UVM_ALL_ON)
+            `uvm_field_int(resp,     UVM_ALL_ON)
+        `uvm_object_utils_end
+
+        function new(string name = "axi_transaction");
+            super.new(name);
+        endfunction
+    endclass
+
+    // Fully Randomized Sequence
+    class axi_random_sequence extends uvm_sequence #(axi_transaction);
+        `uvm_object_utils(axi_random_sequence)
+
+        function new(string name = "axi_random_sequence");
+            super.new(name);
+        endfunction
+
+        task body();
+            axi_transaction tr;
+            bit [31:0] saved_addr;
+            bit [31:0] saved_data;
+
+            // 4 Random Write & Read Transactions ka loop
+            for (int i = 0; i < 4; i++) begin
+                // 1. Random Write Transaction
+                tr = axi_transaction::type_id::create($sformatf("rand_write_%0d", i));
+                start_item(tr);
+                
+                assert(tr.randomize() with {
+                    is_write == 1'b1;
+                    addr     inside {[32'h0000_0100 : 32'h0000_0200]};
+                    wstrb    == 4'b1111;
+                });
+                
+                saved_addr = tr.addr;
+                saved_data = tr.data;
+                finish_item(tr);
+
+                // 2. Random Read Transaction (Usi generated address par)
+                tr = axi_transaction::type_id::create($sformatf("rand_read_%0d", i));
+                start_item(tr);
+                
+                assert(tr.randomize() with {
+                    is_write == 1'b0;
+                    addr     == saved_addr;
+                    wstrb    == 4'b1111;
+                });
+                finish_item(tr);
+            end
+        endtask
+    endclass
+
+    class axi_driver extends uvm_driver #(axi_transaction);
+        `uvm_component_utils(axi_driver)
+        virtual axi_if vif;
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        function void build_phase(uvm_phase phase);
+            super.build_phase(phase);
+            if (!uvm_config_db#(virtual axi_if)::get(this, "", "vif", vif))
+                `uvm_fatal("AXI_DRIVER", "AXI interface not found");
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            axi_transaction tr;
+            vif.AWVALID <= 0;
+            vif.WVALID  <= 0;
+            vif.BREADY  <= 0;
+            vif.ARVALID <= 0;
+            vif.RREADY  <= 0;
+
+            wait(vif.ARESETn == 1'b1);
+            @(posedge vif.ACLK);
+
+            forever begin
+                seq_item_port.get_next_item(tr);
+                if (tr.is_write)
+                    drive_write(tr);
+                else
+                    drive_read(tr);
+                seq_item_port.item_done();
+            end
+        endtask
+
+        task drive_write(axi_transaction tr);
+            vif.AWADDR  <= tr.addr;
+            vif.AWVALID <= 1'b1;
+            vif.WDATA   <= tr.data;
+            vif.WSTRB   <= tr.wstrb;
+            vif.WVALID  <= 1'b1;
+
+            @(posedge vif.ACLK);
+            while (!(vif.AWREADY && vif.WREADY)) @(posedge vif.ACLK);
+
+            vif.AWVALID <= 1'b0;
+            vif.WVALID  <= 1'b0;
+
+            vif.BREADY <= 1'b1;
+            @(posedge vif.ACLK);
+            while (!vif.BVALID) @(posedge vif.ACLK);
+
+            vif.BREADY <= 1'b0;
+        endtask
+
+        task drive_read(axi_transaction tr);
+            vif.ARADDR  <= tr.addr;
+            vif.ARVALID <= 1'b1;
+
+            @(posedge vif.ACLK);
+            while (!vif.ARREADY) @(posedge vif.ACLK);
+
+            vif.ARVALID <= 1'b0;
+
+            vif.RREADY <= 1'b1;
+            @(posedge vif.ACLK);
+            while (!vif.RVALID) @(posedge vif.ACLK);
+
+            vif.RREADY <= 1'b0;
+        endtask
+    endclass
+
+    class axi_monitor extends uvm_monitor;
+        `uvm_component_utils(axi_monitor)
+        virtual axi_if vif;
+        uvm_analysis_port #(axi_transaction) ap;
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+            ap = new("ap", this);
+        endfunction
+
+        function void build_phase(uvm_phase phase);
+            super.build_phase(phase);
+            if (!uvm_config_db#(virtual axi_if)::get(this, "", "vif", vif))
+                `uvm_fatal("AXI_MONITOR", "AXI interface not found");
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            axi_transaction tr;
+            forever begin
+                @(posedge vif.ACLK);
+                if (vif.BVALID && vif.BREADY) begin
+                    tr = axi_transaction::type_id::create("axi_write_monitor");
+                    tr.is_write = 1'b1;
+                    tr.resp = vif.BRESP;
+                    ap.write(tr);
+                end
+                if (vif.RVALID && vif.RREADY) begin
+                    tr = axi_transaction::type_id::create("axi_read_monitor");
+                    tr.is_write = 1'b0;
+                    tr.rdata = vif.RDATA;
+                    tr.resp = vif.RRESP;
+                    ap.write(tr);
+                end
+            end
+        endtask
+    endclass
+
+    class ahb_monitor extends uvm_monitor;
+        `uvm_component_utils(ahb_monitor)
+        virtual ahb_if vif;
+        uvm_analysis_port #(axi_transaction) ap;
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+            ap = new("ap", this);
+        endfunction
+
+        function void build_phase(uvm_phase phase);
+            super.build_phase(phase);
+            if (!uvm_config_db#(virtual ahb_if)::get(this, "", "vif", vif))
+                `uvm_fatal("AHB_MONITOR", "AHB interface not found");
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            axi_transaction tr;
+            forever begin
+                @(posedge vif.HCLK);
+                if (vif.HREADY && vif.HTRANS == 2'b10) begin
+                    tr = axi_transaction::type_id::create("ahb_transaction");
+                    tr.is_write = vif.HWRITE;
+                    tr.addr     = vif.HADDR;
+                    if (vif.HWRITE)
+                        tr.data = vif.HWDATA;
+                    else
+                        tr.rdata = vif.HRDATA;
+                    tr.resp = {1'b0, vif.HRESP};
+                    ap.write(tr);
+                end
+            end
+        endtask
+    endclass
+
+    class axi_agent extends uvm_agent;
+        `uvm_component_utils(axi_agent)
+        uvm_sequencer #(axi_transaction) sequencer;
+        axi_driver driver;
+        axi_monitor monitor;
+        virtual axi_if vif;
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        function void build_phase(uvm_phase phase);
+            super.build_phase(phase);
+            sequencer = uvm_sequencer#(axi_transaction)::type_id::create("sequencer", this);
+            driver    = axi_driver::type_id::create("driver", this);
+            monitor   = axi_monitor::type_id::create("monitor", this);
+
+            if (!uvm_config_db#(virtual axi_if)::get(this, "", "vif", vif))
+                `uvm_fatal("AXI_AGENT", "AXI interface not found");
+
+            uvm_config_db#(virtual axi_if)::set(this, "driver", "vif", vif);
+            uvm_config_db#(virtual axi_if)::set(this, "monitor", "vif", vif);
+        endfunction
+
+        function void connect_phase(uvm_phase phase);
+            driver.seq_item_port.connect(sequencer.seq_item_export);
+        endfunction
+    endclass
+
+    class ahb_agent extends uvm_agent;
+        `uvm_component_utils(ahb_agent)
+        ahb_monitor monitor;
+        virtual ahb_if vif;
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        function void build_phase(uvm_phase phase);
+            super.build_phase(phase);
+            monitor = ahb_monitor::type_id::create("monitor", this);
+
+            if (!uvm_config_db#(virtual ahb_if)::get(this, "", "vif", vif))
+                `uvm_fatal("AHB_AGENT", "AHB interface not found");
+
+            uvm_config_db#(virtual ahb_if)::set(this, "monitor", "vif", vif);
+        endfunction
+    endclass
+
+    `uvm_analysis_imp_decl(_axi)
+    `uvm_analysis_imp_decl(_ahb)
+
+    class scoreboard extends uvm_scoreboard;
+        `uvm_component_utils(scoreboard)
+
+        uvm_analysis_imp_axi #(axi_transaction, scoreboard) axi_imp;
+        uvm_analysis_imp_ahb #(axi_transaction, scoreboard) ahb_imp;
+
+        int axi_write_count, axi_read_count;
+        int ahb_write_count, ahb_read_count;
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+            axi_imp = new("axi_imp", this);
+            ahb_imp = new("ahb_imp", this);
+        endfunction
+
+        function void write_axi(axi_transaction tr);
+            if (tr.is_write) begin
+                axi_write_count++;
+                if (tr.resp == 2'b00)
+                    `uvm_info("SCOREBOARD", "AXI WRITE RESPONSE PASS", UVM_LOW)
+                else
+                    `uvm_error("SCOREBOARD", "AXI WRITE RESPONSE ERROR")
+            end else begin
+                axi_read_count++;
+                if (tr.resp == 2'b00)
+                    `uvm_info("SCOREBOARD", $sformatf("AXI READ PASS: DATA=%h", tr.rdata), UVM_LOW)
+                else
+                    `uvm_error("SCOREBOARD", "AXI READ ERROR")
+            end
+        endfunction
+
+        function void write_ahb(axi_transaction tr);
+            if (tr.is_write) begin
+                ahb_write_count++;
+            end else begin
+                ahb_read_count++;
+            end
+        endfunction
+    endclass
+
+    class axi_ahb_env extends uvm_env;
+        `uvm_component_utils(axi_ahb_env)
+        axi_agent axi_ag;
+        ahb_agent ahb_ag;
+        scoreboard sb;
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        function void build_phase(uvm_phase phase);
+            super.build_phase(phase);
+            axi_ag = axi_agent::type_id::create("axi_ag", this);
+            ahb_ag = ahb_agent::type_id::create("ahb_ag", this);
+            sb     = scoreboard::type_id::create("sb", this);
+        endfunction
+
+        function void connect_phase(uvm_phase phase);
+            axi_ag.monitor.ap.connect(sb.axi_imp);
+            ahb_ag.monitor.ap.connect(sb.ahb_imp);
+        endfunction
+    endclass
+
+    class axi_ahb_test extends uvm_test;
+        `uvm_component_utils(axi_ahb_test)
+        axi_ahb_env env;
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        function void build_phase(uvm_phase phase);
+            super.build_phase(phase);
+            env = axi_ahb_env::type_id::create("env", this);
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            axi_random_sequence seq; // Updated to use random sequence
+            phase.raise_objection(this);
+
+            wait(ARESETn == 1'b1);
+            @(posedge ACLK);
+
+            seq = axi_random_sequence::type_id::create("seq");
+            seq.start(env.axi_ag.sequencer);
+
+            #100;
+
+            if ((env.sb.axi_write_count == 4) &&
+                (env.sb.axi_read_count  == 4)) begin
+                `uvm_info("TEST", "====================================", UVM_NONE)
+                `uvm_info("TEST", "ALL RANDOM TESTCASES PASSED SUCCESSFULLY!", UVM_NONE)
+                `uvm_info("TEST", "====================================", UVM_NONE)
+            end else begin
+                `uvm_error("TEST", "Transaction count mismatch in random testcases")
+            end
+
+            phase.drop_objection(this);
+        endtask
+    endclass
+
+    initial begin
+        uvm_config_db#(virtual axi_if)::set(null, "uvm_test_top.env.axi_ag", "vif", axi_vif);
+        uvm_config_db#(virtual ahb_if)::set(null, "uvm_test_top.env.ahb_ag", "vif", ahb_vif);
+        run_test("axi_ahb_test");
+    end
+
+    initial begin
+        $dumpfile("axi_ahb_waveform.vcd");
+        $dumpvars(0, tb_top);
+    end
+
+endmodule
